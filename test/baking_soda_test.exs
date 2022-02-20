@@ -80,8 +80,4 @@ defmodule BakingSodaTest do
   test "nested_list" do
     assert {:ok, [1,2,[3, 4,[5]]]} = BakingSoda.load(@nested_list)
   end
-
-
-
-
 end
