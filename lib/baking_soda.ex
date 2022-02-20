@@ -1,11 +1,7 @@
 defmodule BakingSoda do
-  # defmodule Object do
-  #  defstruct [...]
-  # end
 
   def load(binary) when is_binary(binary) do
     case binary do
-      # TODO: What are those first three bytes?
       <<128, 4, rest::binary>> ->
         load(rest, [], [])
 
