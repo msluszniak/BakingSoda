@@ -1,12 +1,11 @@
 defmodule BakingSoda do
-  # defmodule Object do
-  #  defstruct [...]
-  # end
 
   def load(binary) when is_binary(binary) do
     case binary do
-      # TODO: What are those first three bytes?
       <<128, 4, rest::binary>> ->
+        load(rest, [], [])
+
+      <<128, 2, rest::binary>> ->
         load(rest, [], [])
 
       _ ->
@@ -113,7 +112,7 @@ defmodule BakingSoda do
   @empty_list ?]
 
   # 101
-  # append everyithing to list before :mark
+  # append everything to list before :mark
   @appends ?e
 
   # 97
@@ -166,6 +165,19 @@ defmodule BakingSoda do
   # where pydict has been modified via pydict[key] = value.
   @set_item ?s
 
+  # 108
+  # Build a list out of the topmost stack slice, after markobject.
+  # All the stack entries following the topmost markobject are placed into
+  # a single Python list, which single list object replaces all of the
+  # stack from the topmost markobject onward.  For example,
+  # Stack before: ... markobject 1 2 3 'abc'
+  # Stack after:  ... [1, 2, 3, 'abc']
+  @list ?l
+
+  # 138
+  # long with 1 byte size and rest in little endian
+  @long1 0x8A
+
   defp load(<<@binint1, int, rest::binary>>, stack, memo) do
     load(rest, [int | stack], memo)
   end
@@ -209,6 +221,10 @@ defmodule BakingSoda do
   defp load(<<@two_byte_int, second, first, rest::binary>>, stack, memo) do
     <<num::integer-size(2)-unit(8)>> = <<first, second>>
     load(rest, [num | stack], memo)
+  end
+
+  defp load(<<@long1, size, value::size(size)-unit(8)-integer-little-signed, rest::binary>>, stack, memo) do
+    load(rest, [value | stack], memo)
   end
 
   defp load(<<@memoize, rest::binary>>, [top | _] = stack, memo) do
@@ -261,6 +277,7 @@ defmodule BakingSoda do
 
   defp load(<<@tuple, rest::binary>>, stack, memo) do
     {leading, [:mark | rest_stack]} = Enum.split_while(stack, &(&1 != :mark))
+    leading = Enum.reverse(leading)
     tuple = List.to_tuple(leading)
     load(rest, [tuple | rest_stack], memo)
   end
@@ -268,6 +285,11 @@ defmodule BakingSoda do
   defp load(<<@appends, rest::binary>>, stack, memo) do
     {leading, [:mark, list_ | rest_stack]} = Enum.split_while(stack, &(&1 != :mark))
     load(rest, [Enum.reverse(leading) ++ list_ | rest_stack], memo)
+  end
+
+  defp load(<<@list, rest::binary>>, stack, memo) do
+    {leading, [:mark| rest_stack]} = Enum.split_while(stack, &(&1 != :mark))
+    load(rest, [Enum.reverse(leading) | rest_stack], memo)
   end
 
   defp load(<<@append, rest::binary>>, [el, list_ | stack], memo) do
