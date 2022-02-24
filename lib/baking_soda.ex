@@ -1,12 +1,35 @@
 defmodule BakingSoda do
+  # Mix.install([
+  #   {:nx, "~> 0.1"}
+  # ])
 
   def load(binary) when is_binary(binary) do
+    builders = %{
+      {:reduce, {:qualifier_stack_global, "numpy", "dtype"}, {"i8", false, true}} => fn _, _, _ ->
+        {:u, 64}
+      end,
+      {:reduce, {:qualifier_stack_global, "numpy", "dtype"}, {"f8", false, true}} => fn _, _, _ ->
+        {:f, 64}
+      end,
+      {:reduce, {:qualifier_stack_global, "numpy", "dtype"}, {"i4", false, true}} => fn _, _, _ ->
+        {:u, 32}
+      end,
+      {:reduce, {:qualifier_stack_global, "numpy", "dtype"}, {"f4", false, true}} => fn _, _, _ ->
+        {:f, 32}
+      end,
+      {:reduce, {:qualifier_stack_global, "numpy.core.multiarray", "_reconstruct"},
+       {{:qualifier_stack_global, "numpy", "ndarray"}, {0}, "b"}} => fn _, [arg, _ | _], _ ->
+        {_, shape, type, _, content} = arg
+        Nx.from_binary(content, type) |> Nx.reshape(shape)
+      end
+    }
+
     case binary do
       <<128, 4, rest::binary>> ->
-        load(rest, [], [])
+        load(rest, [], [], builders)
 
       <<128, 2, rest::binary>> ->
-        load(rest, [], [])
+        load(rest, [], [], builders)
 
       _ ->
         {:error, "protocol version not supported"}
@@ -127,7 +150,6 @@ defmodule BakingSoda do
   # push an empty dict on a stack
   @empty_dict ?}
 
-
   # 143
   # push an empty set on a stack
   @empty_set 0x8F
@@ -178,171 +200,284 @@ defmodule BakingSoda do
   # long with 1 byte size and rest in little endian
   @long1 0x8A
 
-  defp load(<<@binint1, int, rest::binary>>, stack, memo) do
-    load(rest, [int | stack], memo)
+  # 113
+  # Store the stack top into the memo.  The stack is not popped.
+  # The index of the memo location to write into is given by the 1-byte
+  # unsigned integer following.
+  @bin_put ?q
+
+  # 88
+  # Push a Python Unicode string object.
+  # There are two arguments:  the first is a 4-byte little-endian unsigned int
+  # giving the number of bytes in the string.  The second is that many
+  # bytes, and is the UTF-8 encoding of the Unicode string.
+  @bin_unicode ?X
+
+  # 99
+  # Push a global object (module.attr) on the stack.
+  # Two newline-terminated strings follow the GLOBAL opcode.  The first is
+  # taken as a module name, and the second as a class name.  The class
+  # object module.class is pushed on the stack.  More accurately, the
+  # object returned by self.find_class(module, class) is pushed on the
+  # stack, so unpickling subclasses can override this form of lookup.
+  @global ?c
+
+  # 81
+  # Push an object identified by a persistent ID.
+  # Like PERSID, except the persistent ID is popped off the stack (instead
+  # of being a string embedded in the opcode bytestream).  The persistent
+  # ID is passed to self.persistent_load(), and whatever object that
+  # returns is pushed on the stack.  See PERSID for more detail.
+  @bin_pers_id ?Q
+
+
+
+  defp load(<<@binint1, int, rest::binary>>, stack, memo, builders) do
+    load(rest, [int | stack], memo, builders)
   end
 
   defp load(
          <<@short_binunicode, size::little, binary::size(size)-binary, rest::binary>>,
          stack,
-         memo
+         memo,
+         builders
        ) do
-    load(rest, [binary | stack], memo)
+    load(rest, [binary | stack], memo, builders)
   end
 
   defp load(
          <<@short_binbytes, size::little, binary::size(size)-binary, rest::binary>>,
          stack,
-         memo
+         memo,
+         builders
        ) do
-    load(rest, [binary | stack], memo)
+    load(rest, [binary | stack], memo, builders)
   end
 
-  defp load(<<@tuple1, rest::binary>>, [one | stack], memo) do
-    load(rest, [{one} | stack], memo)
+  defp load(<<@tuple1, rest::binary>>, [one | stack], memo, builders) do
+    load(rest, [{one} | stack], memo, builders)
   end
 
-  defp load(<<@tuple2, rest::binary>>, [two, one | stack], memo) do
-    load(rest, [{one, two} | stack], memo)
+  defp load(<<@tuple2, rest::binary>>, [two, one | stack], memo, builders) do
+    load(rest, [{one, two} | stack], memo, builders)
   end
 
-  defp load(<<@tuple3, rest::binary>>, [three, two, one | stack], memo) do
-    load(rest, [{one, two, three} | stack], memo)
+  defp load(<<@tuple3, rest::binary>>, [three, two, one | stack], memo, builders) do
+    load(rest, [{one, two, three} | stack], memo, builders)
   end
 
-  defp load(<<@binfloat, value::float-big, rest::binary>>, stack, memo) do
-    load(rest, [value | stack], memo)
+  defp load(<<@binfloat, value::float-big, rest::binary>>, stack, memo, builders) do
+    load(rest, [value | stack], memo, builders)
   end
 
-  defp load(<<@four_byte_int, value::32-integer-big-signed, rest::binary>>, stack, memo) do
-    load(rest, [value | stack], memo)
+  defp load(<<@four_byte_int, value::32-integer-big-signed, rest::binary>>, stack, memo, builders) do
+    load(rest, [value | stack], memo, builders)
   end
 
-  defp load(<<@two_byte_int, second, first, rest::binary>>, stack, memo) do
+  defp load(<<@two_byte_int, second, first, rest::binary>>, stack, memo, builders) do
     <<num::integer-size(2)-unit(8)>> = <<first, second>>
-    load(rest, [num | stack], memo)
+    load(rest, [num | stack], memo, builders)
   end
 
-  defp load(<<@long1, size, value::size(size)-unit(8)-integer-little-signed, rest::binary>>, stack, memo) do
-    load(rest, [value | stack], memo)
+  defp load(
+         <<@long1, size, value::size(size)-unit(8)-integer-little-signed, rest::binary>>,
+         stack,
+         memo,
+         builders
+       ) do
+    load(rest, [value | stack], memo, builders)
   end
 
-  defp load(<<@memoize, rest::binary>>, [top | _] = stack, memo) do
-    load(rest, stack, [top | memo])
+  defp load(<<@memoize, rest::binary>>, [top | _] = stack, memo, builders) do
+    load(rest, stack, [top | memo], builders)
   end
 
-  defp load(<<@mark, rest::binary>>, stack, memo) do
-    load(rest, [:mark | stack], memo)
+  defp load(<<@mark, rest::binary>>, stack, memo, builders) do
+    load(rest, [:mark | stack], memo, builders)
   end
 
-  # TODO: handle framing
-  defp load(<<@framing, _size::64, rest::binary>>, stack, memo) do
-    load(rest, stack, memo)
+  defp load(<<@framing, _size::64, rest::binary>>, stack, memo, builders) do
+    load(rest, stack, memo, builders)
   end
 
-  defp load(<<@stack_global, rest::binary>>, [two, one | stack], memo) do
-    load(rest, [{:qualifier, one, two} | stack], memo)
+  defp load(<<@stack_global, rest::binary>>, [two, one | stack], memo, builders) do
+    load(rest, [{:qualifier_stack_global, one, two} | stack], memo, builders)
   end
 
-  defp load(<<@reduce, rest::binary>>, [arg, class | stack], memo) do
-    case class do
-      {:qualifier, "collections", "OrderedDict"} -> load(rest, [%{} | stack], memo)
-      _ -> load(rest, [{:reduce, class, arg} | stack], memo)
+  # in current version I skip the newlines (<<10>>)
+  def parse_global(binary) do
+    parse_global(binary, <<>>)
+  end
+
+  def parse_global(<<byte::binary-size(1)-unit(8), rest::binary>>, word1) do
+    case byte do
+      <<10>> -> parse_global(rest, word1, <<>>)
+      _ -> parse_global(rest, word1 <> byte)
     end
   end
 
-  defp load(<<@bin_get, idx::little, rest::binary>>, stack, memo) do
+  def parse_global(<<byte::binary-size(1)-unit(8), rest::binary>>, word1, word2) do
+    case byte do
+      <<10>> -> {word1, word2, rest}
+      _ -> parse_global(rest, word1, word2 <> byte)
+    end
+  end
+
+  defp load(<<@global, rest::binary>>, stack, memo, builders) do
+    {module, class, rest} = parse_global(rest)
+    load(rest, [{:qualifier_global, module, class} | stack], memo, builders)
+  end
+
+  defp load(<<@reduce, rest::binary>>, [arg, class | stack], memo, builders) do
+    case class do
+      {:qualifier_stack_global, "collections", "OrderedDict"} ->
+        load(rest, [%{} | stack], memo, builders)
+
+      {:qualifier_stack_global, "torch.storage", "_load_from_bytes"} ->
+        # File.write!("torch_storage.b", arg, [:binary])
+        {arg_new} = arg
+        File.write!("torch_storage.b", arg_new)
+        # File.write!("torch_storage.b", inspect(arg_new, limit: :infinity))
+        load(rest, [{:reduce, class, arg} | stack], memo, builders)
+
+      _ ->
+        load(rest, [{:reduce, class, arg} | stack], memo, builders)
+    end
+  end
+
+  defp load(<<@bin_get, idx::little, rest::binary>>, stack, memo, builders) do
     n = length(memo)
     el = Enum.at(memo, n - 1 - idx)
-    load(rest, [el | stack], memo)
+    load(rest, [el | stack], memo, builders)
   end
 
-  defp load(<<@long_bin_get, idx::32-integer-little-unsigned, rest::binary>>, stack, memo) do
+  defp load(
+         <<@long_bin_get, idx::32-integer-little-unsigned, rest::binary>>,
+         stack,
+         memo,
+         builders
+       ) do
     n = length(memo)
     el = Enum.at(memo, n - 1 - idx)
-    load(rest, [el | stack], memo)
+    load(rest, [el | stack], memo, builders)
   end
 
-  defp load(<<@new_false, rest::binary>>, stack, memo) do
-    load(rest, [false | stack], memo)
+  # there should be utf-8 instead binary, but I cannot set the length of a unicode string.
+  defp load(
+         <<@bin_unicode, size::32-integer-little-unsigned, value::size(size)-binary,
+           rest::binary>>,
+         stack,
+         memo,
+         builders
+       ) do
+    load(rest, [value | stack], memo, builders)
   end
 
-  defp load(<<@new_true, rest::binary>>, stack, memo) do
-    load(rest, [true | stack], memo)
+  defp load(<<@new_false, rest::binary>>, stack, memo, builders) do
+    load(rest, [false | stack], memo, builders)
   end
 
-  defp load(<<@new_none, rest::binary>>, stack, memo) do
-    load(rest, [nil | stack], memo)
+  defp load(<<@new_true, rest::binary>>, stack, memo, builders) do
+    load(rest, [true | stack], memo, builders)
   end
 
-  defp load(<<@tuple, rest::binary>>, stack, memo) do
+  defp load(<<@new_none, rest::binary>>, stack, memo, builders) do
+    load(rest, [nil | stack], memo, builders)
+  end
+
+  defp load(<<@tuple, rest::binary>>, stack, memo, builders) do
     {leading, [:mark | rest_stack]} = Enum.split_while(stack, &(&1 != :mark))
     leading = Enum.reverse(leading)
     tuple = List.to_tuple(leading)
-    load(rest, [tuple | rest_stack], memo)
+    load(rest, [tuple | rest_stack], memo, builders)
   end
 
-  defp load(<<@appends, rest::binary>>, stack, memo) do
+  defp load(<<@appends, rest::binary>>, stack, memo, builders) do
     {leading, [:mark, list_ | rest_stack]} = Enum.split_while(stack, &(&1 != :mark))
-    load(rest, [Enum.reverse(leading) ++ list_ | rest_stack], memo)
+    load(rest, [Enum.reverse(leading) ++ list_ | rest_stack], memo, builders)
   end
 
-  defp load(<<@list, rest::binary>>, stack, memo) do
-    {leading, [:mark| rest_stack]} = Enum.split_while(stack, &(&1 != :mark))
-    load(rest, [Enum.reverse(leading) | rest_stack], memo)
+  defp load(<<@list, rest::binary>>, stack, memo, builders) do
+    {leading, [:mark | rest_stack]} = Enum.split_while(stack, &(&1 != :mark))
+    load(rest, [Enum.reverse(leading) | rest_stack], memo, builders)
   end
 
-  defp load(<<@append, rest::binary>>, [el, list_ | stack], memo) do
-    load(rest, [[el | list_] | stack], memo)
+  defp load(<<@append, rest::binary>>, [el, list_ | stack], memo, builders) do
+    load(rest, [[el | list_] | stack], memo, builders)
   end
 
-  defp load(<<@build, rest::binary>>, [arg, object | stack], memo) do
-    load(rest, [{:build, object, arg} | stack], memo)
+  defp load(<<@build, rest::binary>>, [arg, object | stack], memo, builders) do
+    case Map.has_key?(builders, object) do
+      true ->
+        val = Map.fetch!(builders, object)
+        load(rest, [val.(rest, [arg, object | stack], memo) | stack], memo, builders)
+
+      false ->
+        load(rest, [{:build, object, arg} | stack], memo, builders)
+    end
   end
 
-  defp load(<<@empty_tuple, rest::binary>>, stack, memo) do
-    load(rest, [{} | stack], memo)
+  defp load(<<@empty_tuple, rest::binary>>, stack, memo, builders) do
+    load(rest, [{} | stack], memo, builders)
   end
 
-  defp load(<<@empty_list, rest::binary>>, stack, memo) do
-    load(rest, [[] | stack], memo)
+  defp load(<<@empty_list, rest::binary>>, stack, memo, builders) do
+    load(rest, [[] | stack], memo, builders)
   end
 
-  defp load(<<@new_object, rest::binary>>, [cls, args | stack], memo) do
-    load(rest, [{:new_object, cls, args} | stack], memo)
+  defp load(<<@new_object, rest::binary>>, [cls, args | stack], memo, builders) do
+    load(rest, [{:new_object, cls, args} | stack], memo, builders)
   end
 
-  defp load(<<@empty_dict, rest::binary>>, stack, memo) do
-    load(rest, [%{} | stack], memo)
+  defp load(<<@empty_dict, rest::binary>>, stack, memo, builders) do
+    load(rest, [%{} | stack], memo, builders)
   end
 
-  defp load(<<@empty_set, rest::binary>>, stack, memo) do
-    load(rest, [MapSet.new() | stack], memo)
+  defp load(<<@empty_set, rest::binary>>, stack, memo, builders) do
+    load(rest, [MapSet.new() | stack], memo, builders)
   end
 
   defp load(
          <<@binbytes, value::32-integer-little-unsigned, binary::size(value)-binary,
            rest::binary>>,
          stack,
-         memo
+         memo,
+         builders
        ) do
-    load(rest, [binary | stack], memo)
+    load(rest, [binary | stack], memo, builders)
   end
 
-  defp load(<<@set_items, rest::binary>>, stack, memo) do
+  defp load(<<@set_items, rest::binary>>, stack, memo, builders) do
     {leading, [:mark, dict_ | rest_stack]} = Enum.split_while(stack, &(&1 != :mark))
     chunked_leading = Enum.chunk_every(leading, 2)
     new_dict = for [val, key] <- chunked_leading, into: %{}, do: {key, val}
     final_dict = Map.merge(new_dict, dict_)
-    load(rest, [final_dict | rest_stack], memo)
+    load(rest, [final_dict | rest_stack], memo, builders)
   end
 
-  defp load(<<@set_item, rest::binary>>, [value, key, dict_| stack], memo) do
-      new_dict = Map.put(dict_, key, value)
-      load(rest, [new_dict | stack], memo)
+  defp load(<<@set_item, rest::binary>>, [value, key, dict_ | stack], memo, builders) do
+    new_dict = Map.put(dict_, key, value)
+    load(rest, [new_dict | stack], memo, builders)
   end
 
-  defp load(<<@stop>>, [stack], _) do
-    {:ok, stack}
+  # TODO: test this one
+  defp load(<<@bin_put, idx, rest::binary>>, [top | stack], memo, builders) do
+    n = length(memo)
+
+    new_memo =
+      case n do
+        0 -> [top]
+        _ -> List.update_at(memo, n - idx - 1, fn _ -> top end)
+      end
+
+    load(rest, [top | stack], new_memo, builders)
+  end
+
+  defp load(<<@bin_pers_id, rest::binary>>, stack, memo, builders) do
+    load(rest, stack, memo, builders)
+  end
+
+  defp load(<<@stop, rest::binary>>, [stack], _, _) do
+    {:ok, stack, rest}
   end
 end
