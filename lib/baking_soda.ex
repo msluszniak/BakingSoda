@@ -1,7 +1,4 @@
 defmodule BakingSoda do
-  # Mix.install([
-  #   {:nx, "~> 0.1"}
-  # ])
 
   def load(binary) when is_binary(binary) do
     builders = %{
