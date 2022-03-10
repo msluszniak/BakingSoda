@@ -543,7 +543,7 @@ defmodule BakingSoda do
   end
 
 
-
+  
   #loading pytorch tensors
   def load_tensor(torch_storage) do
     {{:reduce, {:qualifier_stack_global, "torch.storage", "_load_from_bytes"}, {bin_storage_data}}, zero_idk, size, stride_idk, false_idk, map_idk} = torch_storage
