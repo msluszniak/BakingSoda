@@ -1,7 +1,11 @@
 defmodule BakingSoda do
-  # Mix.install([
-  #   {:nx, "~> 0.1"}
-  # ])
+  Mix.install([
+    {:nx, "~> 0.1.0-dev", github: "elixir-nx/nx", sparse: "nx", override: true},
+    {:axon, "~> 0.1.0-dev", github: "elixir-nx/axon", branch: "main"},
+    {:exla, "~> 0.1.0-dev", github: "elixir-nx/nx", sparse: "exla", override: true}
+  ])
+
+  # for <<size::64-unsigned, file::size(32)-float-little <- rest5>>, do: file
 
   def load(binary) when is_binary(binary) do
     builders = %{
@@ -21,8 +25,53 @@ defmodule BakingSoda do
        {{:qualifier_stack_global, "numpy", "ndarray"}, {0}, "b"}} => fn _, [arg, _ | _], _ ->
         {_, shape, type, _, content} = arg
         Nx.from_binary(content, type) |> Nx.reshape(shape)
+      end,
+      {:new_object, {}, {:qualifier_stack_global, "torch.nn.modules.linear", "Linear"}} => fn _, [arg, _ | _], _ ->
+        parameters = Map.fetch!(arg, "_parameters")
+        bias = Map.fetch!(parameters, "bias")
+        weight = Map.fetch!(parameters, "weight")
+        fn (input) -> Axon.Layers.dense(input, weight, bias) end
+      end,
+      {:new_object, {}, {:qualifier_stack_global, "torch.nn.modules.sparse", "Embedding"}} => fn _, [arg, _ | _ ], _ ->
+        parameters = Map.fetch!(arg, "_parameters")
+        weight = Map.fetch!(parameters, "weight")
+        fn (input) -> Axon.Layers.embedding(input, weight) end
+      end,
+      {:new_object, {}, {:qualifier_stack_global, "torch.nn.modules.conv", "Conv2d"}} => fn _, [arg, _ | _], _ ->
+        parameters = Map.fetch!(arg, "_parameters")
+        bias = Map.fetch!(parameters, "bias")
+        weight = Map.fetch!(parameters, "weight")
+        #reversed_padding_reapted_twice = Map.fetch!(arg, "_reversed_padding_reapted_twice") #not always appear
+        dilation = Map.fetch!(arg, "dilation")
+        groups = Map.fetch!(arg, "groups")
+        kernel_size = Map.fetch!(arg, "kernel_size")
+        output_padding = Map.fetch!(arg, "output_padding")
+        padding = Map.fetch!(arg, "padding")
+        padding_mode = Map.fetch!(arg, "padding_mode")
+        stride = Map.fetch!(arg, "stride")
+        fn (input) -> Axon.Layers.conv(input, weight, bias, strides: stride, padding: padding, kernel_dilation: dilation) end
+      end,
+
+      {:new_object, {}, {:qualifier_stack_global, "torch.nn.modules.normalization", "LayerNorm"}} => fn _, [arg, _ | _], _ ->
+        parameters = Map.fetch!(arg, "_parameters")
+        bias = Map.fetch!(parameters, "bias")
+        weight = Map.fetch!(parameters, "weight")
+        eps = Map.fetch!(arg, "eps")
+        fn (input) -> Axon.Layers.layer_norm(input, weight, bias, epsilon: eps) end
+      end,
+
+      {:new_object, {}, {:qualifier_stack_global, "torch.nn.modules.container","ModuleList"}} => fn _, [arg, _ | _], _ ->
+        modules = Map.fetch!(arg, "_modules")
+        map_len = Enum.count(modules)
+        module_list = for i <- 0..(map_len-1), do: Map.fetch!(modules, "#{i}")
+        # IO.inspect(module_list, limit: :infinity)
       end
+
     }
+
+    # ["_backward_hooks", "_buffers", "_forward_hooks", "_forward_pre_hooks",
+    # "_is_full_backward_hook", "_load_state_dict_pre_hooks", "_modules",
+    # "_non_persistent_buffers_set", "_parameters", "_state_dict_hooks", "training"]
 
     case binary do
       <<128, 4, rest::binary>> ->
@@ -230,6 +279,9 @@ defmodule BakingSoda do
   # returns is pushed on the stack.  See PERSID for more detail.
   @bin_pers_id ?Q
 
+  @magical_number 119547037146038801333356
+  @protocol_version 1001
+
 
 
   defp load(<<@binint1, int, rest::binary>>, stack, memo, builders) do
@@ -301,7 +353,10 @@ defmodule BakingSoda do
   end
 
   defp load(<<@stack_global, rest::binary>>, [two, one | stack], memo, builders) do
-    load(rest, [{:qualifier_stack_global, one, two} | stack], memo, builders)
+    case {one, two} do
+      {"torch.nn.functional", "relu"} -> load(rest, [fn (input) -> Axon.Activations.relu(input) end | stack], memo, builders)
+      _ -> load(rest, [{:qualifier_stack_global, one, two} | stack], memo, builders)
+    end
   end
 
   # in current version I skip the newlines (<<10>>)
@@ -335,11 +390,17 @@ defmodule BakingSoda do
 
       {:qualifier_stack_global, "torch.storage", "_load_from_bytes"} ->
         # File.write!("torch_storage.b", arg, [:binary])
-        {arg_new} = arg
-        File.write!("torch_storage.b", arg_new)
+        # {arg_new} = arg
+        # File.write!("torch_storage.b", arg_new)
         # File.write!("torch_storage.b", inspect(arg_new, limit: :infinity))
         load(rest, [{:reduce, class, arg} | stack], memo, builders)
 
+      {:qualifier_stack_global, "torch._utils", "_rebuild_tensor_v2"} ->
+        load(rest, [load_tensor(arg) | stack], memo, builders)
+
+      {:qualifier_stack_global, "torch._utils", "_rebuild_parameter"} ->
+        {tensor, requires_grad?, backward_hooks} = arg
+        load(rest, [tensor | stack], memo, builders)
       _ ->
         load(rest, [{:reduce, class, arg} | stack], memo, builders)
     end
@@ -479,5 +540,40 @@ defmodule BakingSoda do
 
   defp load(<<@stop, rest::binary>>, [stack], _, _) do
     {:ok, stack, rest}
+  end
+
+
+
+  #loading pytorch tensors
+  def load_tensor(torch_storage) do
+    {{:reduce, {:qualifier_stack_global, "torch.storage", "_load_from_bytes"}, {bin_storage_data}}, zero_idk, size, stride_idk, false_idk, map_idk} = torch_storage
+    {:ok, magical_numer, rest1} = load(bin_storage_data)
+    # assert magical_numer = @magical_number
+    {:ok, protocol_version, rest2} = load(rest1)
+    # assert protocol_version = @protocol_version
+    {:ok, sys_info, rest3} = load(rest2)
+    {:ok, object_info, rest4} = load(rest3)
+    {"storage", {:qualifier_global, "torch", type}, persistent_id, device, size_, nil_idk} = object_info
+    tensor_type = case type do
+      "LongStorage" -> {:s, 64}
+      "FloatStorage" -> {:f, 32}
+      "BoolStorage" -> {:u, 8}
+      "DoubleStorage" -> {:f, 64}
+      "BFloat16Storage" -> {:bf, 16}
+    end
+    # assert size = size_
+    {:ok, [persistent_id_], rest5} = load(rest4)
+    # assert persistent_id = persistent_id_
+    #IO.inspect(rest5)
+    <<data_size::64-unsigned-little, rest::binary>> = rest5
+    values = case type do
+      "LongStorage" -> for <<val::64-signed-little <- rest>>, do: val
+      "FloatStorage" -> for <<val::32-float-little <- rest>>, do: val
+      "DoubleStorage" -> for <<val::64-float-little <- rest>>, do: val
+      "BoolStorage" -> for <<bit <- rest>>, do: (if bit == 1 do 1 else 0 end)
+      "BFloat16Storage" -> for <<val::16-float-little <- rest>>, do: val
+      _ -> :error
+    end
+    Nx.tensor(values, type: tensor_type) |> Nx.reshape(size)
   end
 end
