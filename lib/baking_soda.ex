@@ -56,14 +56,10 @@ defmodule BakingSoda do
         modules = Map.fetch!(arg, "_modules")
         map_len = Enum.count(modules)
         module_list = for i <- 0..(map_len-1), do: Map.fetch!(modules, "#{i}")
-        # IO.inspect(module_list, limit: :infinity)
       end
 
     }
 
-    # ["_backward_hooks", "_buffers", "_forward_hooks", "_forward_pre_hooks",
-    # "_is_full_backward_hook", "_load_state_dict_pre_hooks", "_modules",
-    # "_non_persistent_buffers_set", "_parameters", "_state_dict_hooks", "training"]
 
     case binary do
       <<128, 4, rest::binary>> ->
@@ -381,10 +377,6 @@ defmodule BakingSoda do
         load(rest, [%{} | stack], memo, builders)
 
       {:qualifier_stack_global, "torch.storage", "_load_from_bytes"} ->
-        # File.write!("torch_storage.b", arg, [:binary])
-        # {arg_new} = arg
-        # File.write!("torch_storage.b", arg_new)
-        # File.write!("torch_storage.b", inspect(arg_new, limit: :infinity))
         load(rest, [{:reduce, class, arg} | stack], memo, builders)
 
       {:qualifier_stack_global, "torch._utils", "_rebuild_tensor_v2"} ->
@@ -540,9 +532,7 @@ defmodule BakingSoda do
   def load_tensor(torch_storage) do
     {{:reduce, {:qualifier_stack_global, "torch.storage", "_load_from_bytes"}, {bin_storage_data}}, zero_idk, size, stride_idk, false_idk, map_idk} = torch_storage
     {:ok, magical_numer, rest1} = load(bin_storage_data)
-    # assert magical_numer = @magical_number
     {:ok, protocol_version, rest2} = load(rest1)
-    # assert protocol_version = @protocol_version
     {:ok, sys_info, rest3} = load(rest2)
     {:ok, object_info, rest4} = load(rest3)
     {"storage", {:qualifier_global, "torch", type}, persistent_id, device, size_, nil_idk} = object_info
@@ -553,10 +543,7 @@ defmodule BakingSoda do
       "DoubleStorage" -> {:f, 64}
       "BFloat16Storage" -> {:bf, 16}
     end
-    # assert size = size_
     {:ok, [persistent_id_], rest5} = load(rest4)
-    # assert persistent_id = persistent_id_
-    #IO.inspect(rest5)
     <<data_size::64-unsigned-little, rest::binary>> = rest5
     values = case type do
       "LongStorage" -> for <<val::64-signed-little <- rest>>, do: val
