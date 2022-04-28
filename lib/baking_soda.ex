@@ -1,12 +1,4 @@
 defmodule BakingSoda do
-  Mix.install([
-    {:nx, "~> 0.1.0-dev", github: "elixir-nx/nx", sparse: "nx", override: true},
-    {:axon, "~> 0.1.0-dev", github: "elixir-nx/axon", branch: "main"},
-    {:exla, "~> 0.1.0-dev", github: "elixir-nx/nx", sparse: "exla", override: true}
-  ])
-
-  # for <<size::64-unsigned, file::size(32)-float-little <- rest5>>, do: file
-
   def load(binary) when is_binary(binary) do
     builders = %{
       {:reduce, {:qualifier_stack_global, "numpy", "dtype"}, {"i8", false, true}} => fn _, _, _ ->
